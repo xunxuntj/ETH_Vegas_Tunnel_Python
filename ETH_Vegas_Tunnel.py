@@ -1,14 +1,13 @@
+import pandas as pd
+import os
 import gate_api
 from gate_api.exceptions import ApiException
-import pandas as pd
-import talib
-import os
 
-# 配置 Gate.io Futures API 客户端
-api_key = os.getenv("API_KEY")  # 只读API Key
-api_secret = os.getenv("API_SECRET")  # 只读API密钥
+# Configure Gate.io Futures API client
+api_key = os.getenv("API_KEY")  # Read-only API Key
+api_secret = os.getenv("API_SECRET")  # Read-only API Secret
 
-# 设置 Futures API 客户端
+# Set up Futures API client
 configuration = gate_api.Configuration(
     host="https://api.gateio.ws/api/v4",
     key=api_key,
@@ -17,41 +16,100 @@ configuration = gate_api.Configuration(
 
 api_client = gate_api.ApiClient(configuration)
 
-# 获取ETH/USDT永续合约数据
+# Function to fetch ETH/USDT perpetual contract data
 def get_market_data(timeframe='5m'):
     api_instance = gate_api.FuturesApi(api_client)
-    currency_pair = 'eth_usdt'  # 交易对（可以根据需求更改）
-    limit = 500  # 获取最近500条K线数据
+    settle = 'usdt'  # Settle currency
+    contract = 'ETH_USDT'  # Trading pair (can be changed as needed)
+    limit = 500  # Fetch the latest 500 candlestick data
     try:
-        # 获取指定交易对的K线数据
-        api_response = api_instance.get_candlestick(currency_pair=currency_pair, timeframe=timeframe, limit=limit)
-        return api_response
+        # Validate the contract name by fetching available contracts
+        contracts = api_instance.list_futures_contracts(settle=settle)
+
+        # Debugging: Print available contracts
+        print("Available contracts:")
+        for c in contracts:
+            print(c.name)  # Print the name of each contract
+
+        if contract not in [c.name for c in contracts]:
+            print(f"Error: Contract '{contract}' not found. Please check the contract name.")
+            return None
+
+        # Get futures candlesticks with proper parameters
+        from_timestamp = 1546905600  # Example start time in Unix timestamp
+        to_timestamp = 1546935600    # Example end time in Unix timestamp
+        interval = '5m'              # Example interval
+
+        try:
+            # Fetch candlestick data with the correct parameters
+            api_response = api_instance.list_futures_candlesticks(
+                settle=settle,
+                contract=contract,
+                _from=from_timestamp,
+                to=to_timestamp,
+                interval=interval
+            )
+            return api_response
+        except ApiException as e:
+            print(f"Exception when calling list_futures_candlesticks: {e}")
+            return None
     except ApiException as e:
-        print(f"调用 get_candlestick 时发生异常：{e}")
+        print(f"Exception when calling list_futures_candlesticks: {e}")
         return None
 
-# 计算EMA, MACD, RSI
+# Replace talib.EMA with pandas' rolling mean for EMA calculation
+def calculate_ema(series, timeperiod):
+    return series.ewm(span=timeperiod, adjust=False).mean()
+
+# Replace talib.MACD with manual calculation
+def calculate_macd(series, fastperiod=12, slowperiod=26, signalperiod=9):
+    ema_fast = calculate_ema(series, fastperiod)
+    ema_slow = calculate_ema(series, slowperiod)
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=signalperiod, adjust=False).mean()
+    hist = macd - signal
+    return macd, signal, hist
+
+# Replace talib.RSI with manual calculation
+def calculate_rsi(series, timeperiod=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=timeperiod).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=timeperiod).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+# Replace talib.ATR with manual calculation
+def calculate_atr(high, low, close, timeperiod=14):
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=timeperiod).mean()
+    return atr
+
+# 更新 calculate_indicators 以使用新函数
 def calculate_indicators(data):
     df = pd.DataFrame(data)
-    
+
     # 将各列数据类型转换为float以便进行计算
     df['last'] = df['last'].astype(float)
     df['high'] = df['high'].astype(float)
     df['low'] = df['low'].astype(float)
     df['vol'] = df['vol'].astype(float)
-    
+
     # 计算EMA
-    df['EMA21'] = talib.EMA(df['last'], timeperiod=21)
-    df['EMA34'] = talib.EMA(df['last'], timeperiod=34)
-    df['EMA144'] = talib.EMA(df['last'], timeperiod=144)
-    df['EMA169'] = talib.EMA(df['last'], timeperiod=169)
-    
+    df['EMA21'] = calculate_ema(df['last'], timeperiod=21)
+    df['EMA34'] = calculate_ema(df['last'], timeperiod=34)
+    df['EMA144'] = calculate_ema(df['last'], timeperiod=144)
+    df['EMA169'] = calculate_ema(df['last'], timeperiod=169)
+
     # 计算MACD
-    df['macd'], df['signal'], df['hist'] = talib.MACD(df['last'], fastperiod=12, slowperiod=26, signalperiod=9)
-    
+    df['macd'], df['signal'], df['hist'] = calculate_macd(df['last'])
+
     # 计算RSI
-    df['RSI'] = talib.RSI(df['last'], timeperiod=14)
-    
+    df['RSI'] = calculate_rsi(df['last'])
+
     return df
 
 # 计算打分
@@ -89,7 +147,7 @@ def calculate_scores(df):
 
 # 计算止损、止盈和风报比
 def calculate_sl_tp(df, risk_factor=1):
-    atr = talib.ATR(df['high'], df['low'], df['last'], timeperiod=14).iloc[-1]
+    atr = calculate_atr(df['high'], df['low'], df['last']).iloc[-1]
     stopLossLong = df['last'].iloc[-1] - atr * risk_factor
     stopLossShort = df['last'].iloc[-1] + atr * risk_factor
     
@@ -124,37 +182,37 @@ def main():
     # 提取价格数据（1小时K线和15分钟K线）
     data_5min = [
         {
-            "timestamp": market_data_5min[0]['timestamp'], 
-            "low": market_data_5min[0]['low'],
-            "high": market_data_5min[0]['high'],
-            "last": market_data_5min[0]['last'],
-            "change": market_data_5min[0]['change'],
-            "vol": market_data_5min[0]['vol'],
-            "close": market_data_5min[0]['last']
+            "timestamp": market_data_5min[0].t,  # Corrected attribute for timestamp
+            "low": market_data_5min[0].l,       # Corrected attribute for low price
+            "high": market_data_5min[0].h,      # Corrected attribute for high price
+            "last": market_data_5min[0].c,      # Corrected attribute for close price
+            "change": None,                     # Placeholder, as change is not directly available
+            "vol": market_data_5min[0].v,       # Corrected attribute for volume
+            "close": market_data_5min[0].c      # Corrected attribute for close price
         }
     ]
     
     data_hour = [
         {
-            "timestamp": market_data_hour[0]['timestamp'], 
-            "low": market_data_hour[0]['low'],
-            "high": market_data_hour[0]['high'],
-            "last": market_data_hour[0]['last'],
-            "change": market_data_hour[0]['change'],
-            "vol": market_data_hour[0]['vol'],
-            "close": market_data_hour[0]['last']
+            "timestamp": market_data_hour[0].t,  # Corrected attribute for timestamp
+            "low": market_data_hour[0].l,       # Corrected attribute for low price
+            "high": market_data_hour[0].h,      # Corrected attribute for high price
+            "last": market_data_hour[0].c,      # Corrected attribute for close price
+            "change": None,                     # Placeholder, as change is not directly available
+            "vol": market_data_hour[0].v,       # Corrected attribute for volume
+            "close": market_data_hour[0].c      # Corrected attribute for close price
         }
     ]
     
     data_15min = [
         {
-            "timestamp": market_data_15min[0]['timestamp'], 
-            "low": market_data_15min[0]['low'],
-            "high": market_data_15min[0]['high'],
-            "last": market_data_15min[0]['last'],
-            "change": market_data_15min[0]['change'],
-            "vol": market_data_15min[0]['vol'],
-            "close": market_data_15min[0]['last']
+            "timestamp": market_data_15min[0].timestamp,
+            "low": market_data_15min[0].low,
+            "high": market_data_15min[0].high,
+            "last": market_data_15min[0].last,
+            "change": market_data_15min[0].change,
+            "vol": market_data_15min[0].vol,
+            "close": market_data_15min[0].last
         }
     ]
     
