@@ -184,77 +184,93 @@ def calculate_indicators(data):
     return df
 
 # 计算打分
-def calculate_scores(df):
-    # 如果没有RSI等关键指标，先返回0分并报错
+def candle_pattern_score(df):
+    # 只看最后两根K线
+    if len(df) < 2:
+        return 0, "无形态"
+    open1 = df['last'].iloc[-2]
+    close1 = df['last'].iloc[-2]
+    open2 = df['last'].iloc[-1]
+    close2 = df['last'].iloc[-1]
+    # 这里假设last即close，实际可扩展为有open列
+    if close2 > open2 and close2 > close1 and open2 > close1:
+        return 2, "阳吞阴"
+    elif close2 < open2 and close2 < close1 and open2 < close1:
+        return 2, "阴吞阳"
+    else:
+        return 0, "无形态"
+
+def calculate_scores(df, trend_score):
     required_cols = ['RSI', 'EMA144', 'EMA169', 'macd', 'signal', 'last']
     for col in required_cols:
         if col not in df.columns:
             logger.error("'%s' column missing in DataFrame. Please check indicator calculation.", col)
-            return 0, 0
-
-    # 初始化打分
+            return 0, 0, {}
     longScore = 0
     shortScore = 0
-
-    # 打印数据框的最后几行以调试数据问题
-    logger.debug("调试信息：数据框最后几行\n%s", df.tail())
-
-    # 确保获取到足够的数据点以进行指标计算
-    if len(df) < 14:
-        logger.error("Insufficient data points for indicator calculations. Please fetch more data.")
-        return 0, 0
-
-    # 只检查最新一行RSI是否为NaN
+    details = {}
     if pd.isna(df['RSI'].iloc[-1]):
         logger.error("Latest RSI is NaN. Please ensure sufficient data points.")
-        return 0, 0
-
-    # 优化打分逻辑以避免冲突
-    logger.debug("多单打分：价格在隧道上方")
-    if df['last'].iloc[-1] > df['EMA144'].iloc[-1] and df['last'].iloc[-1] > df['EMA169'].iloc[-1]:
-        longScore += 30
-        logger.debug("指标满足: last=%f > EMA144=%f and last=%f > EMA169=%f，得分 +30", df['last'].iloc[-1], df['EMA144'].iloc[-1], df['last'].iloc[-1], df['EMA169'].iloc[-1])
+        return 0, 0, details
+    # 1H趋势分数
+    if trend_score == 2:
+        longScore += 2
+        details['1h_trend'] = '上涨'
+    elif trend_score == -2:
+        shortScore += 2
+        details['1h_trend'] = '下跌'
     else:
-        logger.debug("指标不满足: last=%f <= EMA144=%f or last=%f <= EMA169=%f，得分 0", df['last'].iloc[-1], df['EMA144'].iloc[-1], df['last'].iloc[-1], df['EMA169'].iloc[-1])
-
-    # 空单打分（1小时K线）
-    logger.debug("空单打分：价格在隧道下方")
-    if df['last'].iloc[-1] < df['EMA144'].iloc[-1] and df['last'].iloc[-1] < df['EMA169'].iloc[-1]:
-        shortScore += 30
-        logger.debug("指标满足: last=%f < EMA144=%f and last=%f < EMA169=%f，得分 +30", df['last'].iloc[-1], df['EMA144'].iloc[-1], df['last'].iloc[-1], df['EMA169'].iloc[-1])
+        details['1h_trend'] = '震荡'
+    # MACD
+    if df['macd'].iloc[-1] > df['signal'].iloc[-1]:
+        longScore += 2
+        details['macd'] = '金叉'
     else:
-        logger.debug("指标不满足: last=%f >= EMA144=%f or last=%f >= EMA169=%f，得分 0", df['last'].iloc[-1], df['EMA144'].iloc[-1], df['last'].iloc[-1], df['EMA169'].iloc[-1])
-
-    # 15分钟K线
-    logger.debug("多单打分：MACD金叉")
-    if df['macd'].iloc[-1] > df['signal'].iloc[-1]:  # MACD金叉
-        longScore += 20
-        logger.debug("指标满足: macd=%f > signal=%f，得分 +20", df['macd'].iloc[-1], df['signal'].iloc[-1])
+        shortScore += 2
+        details['macd'] = '死叉'
+    # RSI
+    if df['RSI'].iloc[-1] > 50:
+        longScore += 2
+        details['rsi'] = '上钩'
     else:
-        logger.debug("指标不满足: macd=%f <= signal=%f，得分 0", df['macd'].iloc[-1], df['signal'].iloc[-1])
-
-    logger.debug("多单打分：RSI上勾")
-    if df['RSI'].iloc[-1] > 40 and df['RSI'].iloc[-1] < 70:  # RSI 上勾
-        longScore += 20
-        logger.debug("指标满足: RSI=%f > 40 and RSI=%f < 70，得分 +20", df['RSI'].iloc[-1], df['RSI'].iloc[-1])
+        shortScore += 2
+        details['rsi'] = '下弯'
+    # K线形态
+    candle_score, candle_type = candle_pattern_score(df)
+    if candle_type == '阳吞阴':
+        longScore += 2
+    elif candle_type == '阴吞阳':
+        shortScore += 2
+    details['candle'] = candle_type
+    # 动量背离
+    momentum = detect_momentum_divergence(df)
+    if momentum > 0:
+        longScore += 2
+        details['momentum_divergence'] = True
+    elif momentum < 0:
+        shortScore += 2
+        details['momentum_divergence'] = True
     else:
-        logger.debug("指标不满足: RSI=%f <= 40 or RSI=%f >= 70，得分 0", df['RSI'].iloc[-1], df['RSI'].iloc[-1])
+        details['momentum_divergence'] = False
+    return longScore, shortScore, details
 
-    logger.debug("空单打分：MACD死叉")
-    if df['macd'].iloc[-1] < df['signal'].iloc[-1]:  # MACD死叉
-        shortScore += 20
-        logger.debug("指标满足: macd=%f < signal=%f，得分 +20", df['macd'].iloc[-1], df['signal'].iloc[-1])
-    else:
-        logger.debug("指标不满足: macd=%f >= signal=%f，得分 0", df['macd'].iloc[-1], df['signal'].iloc[-1])
-
-    logger.debug("空单打分：RSI下弯")
-    if df['RSI'].iloc[-1] < 50:  # RSI 下弯
-        shortScore += 20
-        logger.debug("指标满足: RSI=%f < 50，得分 +20", df['RSI'].iloc[-1])
-    else:
-        logger.debug("指标不满足: RSI=%f >= 50，得分 0", df['RSI'].iloc[-1])
-
-    return longScore, shortScore
+# 动量背离检测模块
+def detect_momentum_divergence(df):
+    # 检查关键列是否存在
+    if 'macd' not in df.columns or 'last' not in df.columns:
+        logger.error("'macd' or 'last' column missing in DataFrame. Please check indicator calculation.")
+        return 0  # 缺失关键指标，无法检测
+    if len(df) < 2:
+        return 0  # 数据不足，无法检测
+    price_diff = df['last'].iloc[-1] - df['last'].iloc[-2]
+    macd_diff = df['macd'].iloc[-1] - df['macd'].iloc[-2]
+    if price_diff > 0 and macd_diff < 0:
+        logger.debug("检测到看空背离，附加空单得分 +10")
+        return -10  # 看空背离
+    elif price_diff < 0 and macd_diff > 0:
+        logger.debug("检测到看多背离，附加多单得分 +10")
+        return 10  # 看多背离
+    return 0
 
 # 计算止损、止盈和风报比
 def calculate_sl_tp(df, risk_factor=1):
@@ -288,70 +304,45 @@ def detect_market_state(df):
     else:
         return "range"  # 震荡市场
 
-# 动量背离检测模块
-def detect_momentum_divergence(df):
-    # 检查关键列是否存在
-    if 'macd' not in df.columns or 'last' not in df.columns:
-        logger.error("'macd' or 'last' column missing in DataFrame. Please check indicator calculation.")
-        return 0  # 缺失关键指标，无法检测
-    if len(df) < 2:
-        return 0  # 数据不足，无法检测
-    price_diff = df['last'].iloc[-1] - df['last'].iloc[-2]
-    macd_diff = df['macd'].iloc[-1] - df['macd'].iloc[-2]
-    if price_diff > 0 and macd_diff < 0:
-        logger.debug("检测到看空背离，附加空单得分 +10")
-        return -10  # 看空背离
-    elif price_diff < 0 and macd_diff > 0:
-        logger.debug("检测到看多背离，附加多单得分 +10")
-        return 10  # 看多背离
-    return 0
-
 # 更新 Vegas 隧道判断逻辑，增加区间扩张和收窄趋势判断
 
 def analyze_vegas_tunnel(df):
-    # 检查关键列是否存在
     required_cols = ['EMA144', 'EMA169', 'last']
     for col in required_cols:
         if col not in df.columns:
             logger.error("'%s' column missing in DataFrame. Please check indicator calculation.", col)
-            return "insufficient_data", "insufficient_data"
-    # 确保数据足够
+            return "insufficient_data", "insufficient_data", 0
     if len(df) < 100:
         logger.error("Insufficient data points for Vegas Tunnel analysis.")
-        return "insufficient_data", "insufficient_data"
-
-    # 判断价格与隧道的位置关系
-    price_above_tunnel = (df['last'] > df['EMA144']) & (df['last'] > df['EMA169'])
-    price_below_tunnel = (df['last'] < df['EMA144']) & (df['last'] < df['EMA169'])
-
-    # 判断隧道形态
+        return "insufficient_data", "insufficient_data", 0
     ema_diff = df['EMA144'] - df['EMA169']
-    ema_diff_positive = ema_diff > 0
-    ema_diff_negative = ema_diff < 0
-
-    # 判断隧道方向
     ema144_slope = df['EMA144'].diff().mean()
     ema169_slope = df['EMA169'].diff().mean()
-
-    if ema144_slope > 0 and ema169_slope > 0 and ema_diff_positive.all():
-        trend = "uptrend"  # 上涨趋势
-    elif ema144_slope < 0 and ema169_slope < 0 and ema_diff_negative.all():
-        trend = "downtrend"  # 下跌趋势
-    elif ema_diff_positive.any() and ema_diff_negative.any():
-        trend = "cross"  # 隧道交叉
+    price = df['last'].iloc[-1]
+    ema144 = df['EMA144'].iloc[-1]
+    ema169 = df['EMA169'].iloc[-1]
+    # 趋势分数
+    trend_score = 0
+    if ema144_slope > 0 and ema169_slope > 0 and (price > ema144 and price > ema169) and (ema_diff.iloc[-1] > ema_diff.iloc[-20]):
+        trend = "uptrend"
+        trend_score = 2
+    elif ema144_slope < 0 and ema169_slope < 0 and (price < ema144 and price < ema169) and (ema_diff.iloc[-1] > ema_diff.iloc[-20]):
+        trend = "downtrend"
+        trend_score = -2
+    elif abs(ema_diff.iloc[-1]) < 2 or (abs(ema144_slope) < 0.1 and abs(ema169_slope) < 0.1):
+        trend = "sideways"
+        trend_score = 0
     else:
-        trend = "sideways"  # 横盘震荡
-
-    # 判断区间变化（扩张或收窄）
+        trend = "cross"
+        trend_score = 0
     ema_diff_slope = ema_diff.diff().mean()
     if ema_diff_slope > 0:
-        range_change = "expanding"  # 区间扩张
+        range_change = "expanding"
     elif ema_diff_slope < 0:
-        range_change = "contracting"  # 区间收窄
+        range_change = "contracting"
     else:
-        range_change = "stable"  # 区间稳定
-
-    return trend, range_change
+        range_change = "stable"
+    return trend, range_change, trend_score
 
 # 更新数据验证和错误处理逻辑
 
@@ -411,71 +402,40 @@ def main():
         return
     
     # 打分（基于5分钟K线、1小时和15分钟K线）
-    longScore, shortScore = calculate_scores(df_15min)
+    trend_direction, range_change, trend_score = analyze_vegas_tunnel(df_hour)
+    longScore, shortScore, signal_details = calculate_scores(df_15min, trend_score)
 
-    # 在打分逻辑中加入动量背离检测
-    longScore += detect_momentum_divergence(df_15min)
-    shortScore += detect_momentum_divergence(df_15min)
-
-    # 检测市场状态并动态调整策略
-    market_state = detect_market_state(df_15min)
-    logger.info("当前市场状态：%s", market_state)
-    if 'macd' in df_15min.columns and 'signal' in df_15min.columns:
-        if market_state == "trend":
-            logger.info("趋势市场：优先使用突破策略")
-            # 在趋势市场中，增加对突破信号的权重
-            if df_15min['macd'].iloc[-1] > df_15min['signal'].iloc[-1]:
-                longScore += 10
-                logger.debug("趋势市场中，MACD金叉附加多单得分 +10")
-            if df_15min['macd'].iloc[-1] < df_15min['signal'].iloc[-1]:
-                shortScore += 10
-                logger.debug("趋势市场中，MACD死叉附加空单得分 +10")
-        else:
-            logger.info("震荡市场：优先使用反转策略")
-            # 在震荡市场中，增加对反转信号的权重
-            if 'RSI' in df_15min.columns:
-                if df_15min['RSI'].iloc[-1] > 70:
-                    shortScore += 10
-                    logger.debug("震荡市场中，RSI超买附加空单得分 +10")
-                if df_15min['RSI'].iloc[-1] < 30:
-                    longScore += 10
-                    logger.debug("震荡市场中，RSI超卖附加多单得分 +10")
-    else:
-        logger.warning("'macd' or 'signal' column missing in df_15min, 跳过趋势/震荡市场加分逻辑。")
-
-    # 止损、止盈、风报比（基于5分钟K线）
-    stopLossLong, stopLossShort, tp1Long, tp2Long, tp1Short, tp2Short, rrLong, rrShort = calculate_sl_tp(df_5min)
-    
-    # 在主函数中调用 Vegas 隧道分析（提前，保证变量已定义）
-    trend_direction, range_change = analyze_vegas_tunnel(df_hour)
+    # 5m确认
+    long_5m = confirm_5m_signal(df_5min, 'long')
+    short_5m = confirm_5m_signal(df_5min, 'short')
 
     # 输出打分和开仓建议（格式化输出，便于市场操作参考）
-    logger.info("\n===== 策略信号输出 =====")
-    logger.info("当前市场状态: %s", market_state)
-    logger.info("1H 趋势方向: %s | 1H 区间变化: %s", trend_direction, range_change)
-    logger.info("15m Long Score: %d | Short Score: %d", longScore, shortScore)
-    logger.info("最新价格: %f", df_15min['last'].iloc[-1])
-    if longScore >= 70:
-        logger.info("【建议开多单】")
-        logger.info("开仓价: %f", df_15min['last'].iloc[-1])
-        logger.info("止损: %f", stopLossLong)
-        logger.info("TP1: %f  风报比: %.2f", tp1Long, rrLong)
-        logger.info("TP2: %f  风报比: %.2f", tp2Long, rrLong * 1.2)
-        trailing_sl, trailing_tp = suggest_trailing_sl_tp(df_15min['last'].iloc[-1], calculate_atr(df_15min['high'], df_15min['low'], df_15min['last']).iloc[-1])
-        logger.info("滚动止损: %f", trailing_sl)
-        logger.info("滚动止盈: %f", trailing_tp)
-    if shortScore >= 70:
-        logger.info("【建议开空单】")
-        logger.info("开仓价: %f", df_15min['last'].iloc[-1])
-        logger.info("止损: %f", stopLossShort)
-        logger.info("TP1: %f  风报比: %.2f", tp1Short, rrShort)
-        logger.info("TP2: %f  风报比: %.2f", tp2Short, rrShort * 1.2)
-        trailing_sl, trailing_tp = suggest_trailing_sl_tp(df_15min['last'].iloc[-1], calculate_atr(df_15min['high'], df_15min['low'], df_15min['last']).iloc[-1])
-        logger.info("滚动止损: %f", trailing_sl)
-        logger.info("滚动止盈: %f", trailing_tp)
-    if longScore < 70 and shortScore < 70:
-        logger.info("当前无明确开仓信号，请耐心等待下一信号。")
-    logger.info("===== 策略信号输出结束 =====\n")
+    output = {
+        "time": pd.to_datetime(df_15min['timestamp'].iloc[-1], unit='s').strftime('%Y-%m-%d %H:%M'),
+        "price": float(df_15min['last'].iloc[-1]),
+        "long_score": int(longScore),
+        "short_score": int(shortScore),
+        "recommendation": "",
+        "take_profit": None,
+        "stop_loss": None,
+        "signal_details": signal_details
+    }
+
+    # 止盈止损
+    stopLossLong, stopLossShort, tp1Long, tp2Long, tp1Short, tp2Short, rrLong, rrShort = calculate_sl_tp(df_5min)
+
+    # 推荐建议
+    if longScore >= 7 and long_5m:
+        output["recommendation"] = "多头强势，建议开多单"
+        output["take_profit"] = float(tp1Long)
+        output["stop_loss"] = float(stopLossLong)
+    elif shortScore >= 7 and short_5m:
+        output["recommendation"] = "空头强势，建议开空单"
+        output["take_profit"] = float(tp1Short)
+        output["stop_loss"] = float(stopLossShort)
+    else:
+        output["recommendation"] = "无明确信号，观望为主"
+    logger.info("\n===== 策略信号结构化输出 =====\n%s\n===== END =====", output)
 
 if __name__ == "__main__":
     main()
