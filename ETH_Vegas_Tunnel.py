@@ -185,23 +185,57 @@ def calculate_indicators(data):
 
 # 计算打分
 def candle_pattern_score(df):
-    # 只看最后两根K线
-    if len(df) < 2:
+    # 只看最后两根或三根K线
+    if len(df) < 3:
         return 0, "无形态"
-    open1 = df['last'].iloc[-2]
-    close1 = df['last'].iloc[-2]
-    open2 = df['last'].iloc[-1]
-    close2 = df['last'].iloc[-1]
-    # 这里假设last即close，实际可扩展为有open列
-    if close2 > open2 and close2 > close1 and open2 > close1:
+    # 取最后三根K线的开收
+    close1, close2, close3 = df['last'].iloc[-3], df['last'].iloc[-2], df['last'].iloc[-1]
+    open1, open2, open3 = close1, close2, close3  # 若有open列可替换
+    high1, high2, high3 = df['high'].iloc[-3], df['high'].iloc[-2], df['high'].iloc[-1]
+    low1, low2, low3 = df['low'].iloc[-3], df['low'].iloc[-2], df['low'].iloc[-1]
+    # 阳吞阴
+    if close3 > open3 and close2 < open2 and close3 > open2 and open3 < close2:
         return 2, "阳吞阴"
-    elif close2 < open2 and close2 < close1 and open2 < close1:
+    # 阴吞阳
+    if close3 < open3 and close2 > open2 and close3 < open2 and open3 > close2:
         return 2, "阴吞阳"
-    else:
-        return 0, "无形态"
+    # 锤子线
+    if close3 > open3 and (open3 - low3) > 2 * abs(close3 - open3) and (high3 - close3) < abs(close3 - open3):
+        return 2, "锤子线"
+    # 上吊线
+    if close3 < open3 and (open3 - low3) > 2 * abs(close3 - open3) and (high3 - open3) < abs(close3 - open3):
+        return 2, "上吊线"
+    # 十字星
+    if abs(close3 - open3) < (high3 - low3) * 0.1:
+        return 2, "十字星"
+    # 早晨之星
+    if close1 < open1 and abs(close2 - open2) < (high2 - low2) * 0.2 and close3 > open3 and close3 > (open1 + close1) / 2:
+        return 2, "早晨之星"
+    # 黄昏之星
+    if close1 > open1 and abs(close2 - open2) < (high2 - low2) * 0.2 and close3 < open3 and close3 < (open1 + close1) / 2:
+        return 2, "黄昏之星"
+    # 乌云盖顶
+    if close2 > open2 and close3 < open3 and open3 > close2 and close3 < (open2 + close2) / 2:
+        return 2, "乌云盖顶"
+    # 刺透形态
+    if close2 < open2 and close3 > open3 and open3 < close2 and close3 > (open2 + close2) / 2:
+        return 2, "刺透形态"
+    # 三连阳
+    if close1 < close2 < close3 and close1 > open1 and close2 > open2 and close3 > open3:
+        return 2, "三连阳"
+    # 三连阴
+    if close1 > close2 > close3 and close1 < open1 and close2 < open2 and close3 < open3:
+        return 2, "三连阴"
+    return 0, "无形态"
 
 def calculate_scores(df, trend_score):
-    required_cols = ['RSI', 'EMA144', 'EMA169', 'macd', 'signal', 'last']
+    """
+    统一采用小分制（每项2分，满分10分），与README一致。
+    1H趋势、MACD、RSI、K线形态、动量背离各占2分。
+    7分及以上为强信号。
+    EMA21过滤：15m收盘价需在EMA21上方（多头）或下方（空头）才允许加分，否则直接返回0分。
+    """
+    required_cols = ['RSI', 'EMA144', 'EMA169', 'macd', 'signal', 'last', 'EMA21']
     for col in required_cols:
         if col not in df.columns:
             logger.error("'%s' column missing in DataFrame. Please check indicator calculation.", col)
@@ -212,6 +246,15 @@ def calculate_scores(df, trend_score):
     if pd.isna(df['RSI'].iloc[-1]):
         logger.error("Latest RSI is NaN. Please ensure sufficient data points.")
         return 0, 0, details
+    # EMA21过滤
+    last = df['last'].iloc[-1]
+    ema21 = df['EMA21'].iloc[-1]
+    if last < ema21:
+        details['ema21_filter'] = '15m收盘价未站上EMA21，long信号无效'
+        return 0, shortScore, details
+    if last > ema21:
+        details['ema21_filter'] = '15m收盘价未跌破EMA21，short信号无效'
+        return longScore, 0, details
     # 1H趋势分数
     if trend_score == 2:
         longScore += 2
@@ -265,11 +308,11 @@ def detect_momentum_divergence(df):
     price_diff = df['last'].iloc[-1] - df['last'].iloc[-2]
     macd_diff = df['macd'].iloc[-1] - df['macd'].iloc[-2]
     if price_diff > 0 and macd_diff < 0:
-        logger.debug("检测到看空背离，附加空单得分 +10")
-        return -10  # 看空背离
+        logger.debug("检测到看空背离，附加空单得分 +2")
+        return -2  # 看空背离
     elif price_diff < 0 and macd_diff > 0:
-        logger.debug("检测到看多背离，附加多单得分 +10")
-        return 10  # 看多背离
+        logger.debug("检测到看多背离，附加多单得分 +2")
+        return 2  # 看多背离
     return 0
 
 # 计算止损、止盈和风报比
@@ -358,6 +401,49 @@ def validate_data(df, required_points):
         return False
     return True
 
+# 5分钟周期信号确认。direction: 'long' or 'short'
+# 以5m最后一根K线的macd与signal判断方向。
+
+def confirm_5m_signal(df_5min, direction):
+    """
+    5分钟周期信号确认。direction: 'long' or 'short'
+    以5m最后一根K线的macd与signal判断方向。
+    """
+    if len(df_5min) < 2:
+        return False
+    if 'macd' not in df_5min.columns or 'signal' not in df_5min.columns:
+        return False
+    if direction == 'long' and df_5min['macd'].iloc[-1] > df_5min['signal'].iloc[-1]:
+        return True
+    if direction == 'short' and df_5min['macd'].iloc[-1] < df_5min['signal'].iloc[-1]:
+        return True
+    return False
+
+# 多周期MACD形态判断
+
+def macd_cross_signal(df):
+    """
+    判断MACD金叉/死叉形态：
+    - 刚刚金叉：前一根死叉，这一根金叉
+    - 刚刚死叉：前一根金叉，这一根死叉
+    - 持续金叉/死叉
+    返回：'just_golden', 'just_dead', 'golden', 'dead', 'none'
+    """
+    if 'macd' not in df.columns or 'signal' not in df.columns or len(df) < 2:
+        return 'none'
+    prev_macd, prev_signal = df['macd'].iloc[-2], df['signal'].iloc[-2]
+    curr_macd, curr_signal = df['macd'].iloc[-1], df['signal'].iloc[-1]
+    if prev_macd <= prev_signal and curr_macd > curr_signal:
+        return 'just_golden'  # 刚刚金叉
+    elif prev_macd >= prev_signal and curr_macd < curr_signal:
+        return 'just_dead'    # 刚刚死叉
+    elif curr_macd > curr_signal:
+        return 'golden'      # 持续金叉
+    elif curr_macd < curr_signal:
+        return 'dead'        # 持续死叉
+    else:
+        return 'none'
+
 # 主函数
 def main():
     # 获取5分钟K线数据
@@ -420,10 +506,8 @@ def main():
         "stop_loss": None,
         "signal_details": signal_details
     }
-
     # 止盈止损
     stopLossLong, stopLossShort, tp1Long, tp2Long, tp1Short, tp2Short, rrLong, rrShort = calculate_sl_tp(df_5min)
-
     # 推荐建议
     if longScore >= 7 and long_5m:
         output["recommendation"] = "多头强势，建议开多单"
@@ -435,7 +519,40 @@ def main():
         output["stop_loss"] = float(stopLossShort)
     else:
         output["recommendation"] = "无明确信号，观望为主"
-    logger.info("\n===== 策略信号结构化输出 =====\n%s\n===== END =====", output)
+    # 在主函数中分别判断1h、15m、5m的MACD形态，并综合决策
+    macd_1h = macd_cross_signal(df_hour)
+    macd_15m = macd_cross_signal(df_15min)
+    macd_5m = macd_cross_signal(df_5min)
+    macd_multi = {
+        '1h': macd_1h,
+        '15m': macd_15m,
+        '5m': macd_5m
+    }
+    output['macd_multi_signal'] = macd_multi
+    # 多周期共振决策
+    if macd_1h in ['just_golden', 'golden'] and macd_15m in ['just_golden', 'golden'] and macd_5m in ['just_golden', 'golden']:
+        output['multi_timeframe_macd'] = '三周期金叉共振，强多信号'
+    elif macd_1h in ['just_dead', 'dead'] and macd_15m in ['just_dead', 'dead'] and macd_5m in ['just_dead', 'dead']:
+        output['multi_timeframe_macd'] = '三周期死叉共振，强空信号'
+    else:
+        output['multi_timeframe_macd'] = '多周期信号不一致，观望为主'
+
+    # ===== 增强可读性输出 =====
+    logger.info("\n===== 策略信号结构化输出（小分制，满分10分，7分及以上为强信号） =====")
+    logger.info("时间: %s", output['time'])
+    logger.info("最新价格: %.2f", output['price'])
+    logger.info("1H趋势: %s | 区间: %s", trend_direction, range_change)
+    logger.info("15m Long Score: %d | Short Score: %d", output['long_score'], output['short_score'])
+    logger.info("MACD形态: 1H=%s, 15m=%s, 5m=%s", macd_1h, macd_15m, macd_5m)
+    logger.info("多周期MACD共振: %s", output['multi_timeframe_macd'])
+    logger.info("信号细节: %s", output['signal_details'])
+    if output['recommendation'] == "多头强势，建议开多单":
+        logger.info("【建议开多单】 开仓价: %.2f 止损: %.2f 止盈: %.2f", output['price'], output['stop_loss'], output['take_profit'])
+    elif output['recommendation'] == "空头强势，建议开空单":
+        logger.info("【建议开空单】 开仓价: %.2f 止损: %.2f 止盈: %.2f", output['price'], output['stop_loss'], output['take_profit'])
+    else:
+        logger.info("【建议】%s", output['recommendation'])
+    logger.info("===== END =====\n")
 
 if __name__ == "__main__":
     main()
