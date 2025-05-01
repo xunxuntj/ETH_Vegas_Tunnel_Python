@@ -1,0 +1,5 @@
+pandas
+requests
+gate-api
+logging
+os
