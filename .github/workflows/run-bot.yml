@@ -2,7 +2,7 @@ name: Run ETH Vegas Tunnel Bot
 
 on:
   schedule:
-    - cron: '*/3 * * * *'   # 每3分钟运行一次
+    - cron: '*/1 * * * *'   # 每3分钟运行一次
   workflow_dispatch:
 
 jobs:
