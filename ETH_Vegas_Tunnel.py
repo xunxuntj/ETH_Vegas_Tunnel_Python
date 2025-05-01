@@ -3,6 +3,7 @@ import os
 import gate_api
 from gate_api.exceptions import ApiException
 import logging
+import requests
 
 # 日志等级设置
 LOGLEVEL = os.getenv("LOGLEVEL", "DEBUG").upper()  # 可通过环境变量控制
@@ -228,12 +229,42 @@ def candle_pattern_score(df):
         return 2, "三连阴"
     return 0, "无形态"
 
+def rsi_signal(df):
+    """
+    综合判断RSI形态变化和数值：
+    - 上勾：前一根RSI小于当前RSI，且当前RSI>50
+    - 下弯：前一根RSI大于当前RSI，且当前RSI<50
+    - 超买：当前RSI>70
+    - 超卖：当前RSI<30
+    返回：('上勾'/'下弯'/'超买'/'超卖'/'强势'/'弱势')
+    """
+    if 'RSI' not in df.columns or len(df) < 2:
+        return '无信号'
+    prev_rsi = df['RSI'].iloc[-2]
+    curr_rsi = df['RSI'].iloc[-1]
+    if curr_rsi > 70:
+        return '超买'
+    if curr_rsi < 30:
+        return '超卖'
+    if curr_rsi > prev_rsi and curr_rsi > 50:
+        return '上勾'
+    if curr_rsi < prev_rsi and curr_rsi < 50:
+        return '下弯'
+    if curr_rsi > 50:
+        return '强势'
+    if curr_rsi < 50:
+        return '弱势'
+    return '无信号'
+
+# 在calculate_scores中集成RSI形态判断
+
 def calculate_scores(df, trend_score):
     """
-    统一采用小分制（每项2分，满分10分），与README一致。
+    统一采用小分制（每项2分，满分10分，7分及以上为强信号），与README一致。
     1H趋势、MACD、RSI、K线形态、动量背离各占2分。
     7分及以上为强信号。
     EMA21过滤：15m收盘价需在EMA21上方（多头）或下方（空头）才允许加分，否则直接返回0分。
+    明细分数和各项原始信号均完整输出。
     """
     required_cols = ['RSI', 'EMA144', 'EMA169', 'macd', 'signal', 'last', 'EMA21']
     for col in required_cols:
@@ -243,58 +274,77 @@ def calculate_scores(df, trend_score):
     longScore = 0
     shortScore = 0
     details = {}
-    if pd.isna(df['RSI'].iloc[-1]):
-        logger.error("Latest RSI is NaN. Please ensure sufficient data points.")
-        return 0, 0, details
-    # EMA21过滤
-    last = df['last'].iloc[-1]
-    ema21 = df['EMA21'].iloc[-1]
-    if last < ema21:
-        details['ema21_filter'] = '15m收盘价未站上EMA21，long信号无效'
-        return 0, shortScore, details
-    if last > ema21:
-        details['ema21_filter'] = '15m收盘价未跌破EMA21，short信号无效'
-        return longScore, 0, details
+    sub_scores = {}
     # 1H趋势分数
     if trend_score == 2:
         longScore += 2
+        sub_scores['1h_trend'] = {'long': 2, 'short': 0, 'desc': '上涨'}
         details['1h_trend'] = '上涨'
     elif trend_score == -2:
         shortScore += 2
+        sub_scores['1h_trend'] = {'long': 0, 'short': 2, 'desc': '下跌'}
         details['1h_trend'] = '下跌'
     else:
+        sub_scores['1h_trend'] = {'long': 0, 'short': 0, 'desc': '震荡'}
         details['1h_trend'] = '震荡'
     # MACD
     if df['macd'].iloc[-1] > df['signal'].iloc[-1]:
         longScore += 2
+        sub_scores['macd'] = {'long': 2, 'short': 0, 'desc': '金叉'}
         details['macd'] = '金叉'
     else:
         shortScore += 2
+        sub_scores['macd'] = {'long': 0, 'short': 2, 'desc': '死叉'}
         details['macd'] = '死叉'
-    # RSI
-    if df['RSI'].iloc[-1] > 50:
+    # RSI形态
+    rsi_shape = rsi_signal(df)
+    details['rsi'] = rsi_shape
+    if rsi_shape in ['上勾', '超买', '强势']:
         longScore += 2
-        details['rsi'] = '上钩'
-    else:
+        sub_scores['rsi'] = {'long': 2, 'short': 0, 'desc': rsi_shape}
+    elif rsi_shape in ['下弯', '超卖', '弱势']:
         shortScore += 2
-        details['rsi'] = '下弯'
+        sub_scores['rsi'] = {'long': 0, 'short': 2, 'desc': rsi_shape}
+    else:
+        sub_scores['rsi'] = {'long': 0, 'short': 0, 'desc': rsi_shape}
     # K线形态
     candle_score, candle_type = candle_pattern_score(df)
-    if candle_type == '阳吞阴':
-        longScore += 2
-    elif candle_type == '阴吞阳':
-        shortScore += 2
     details['candle'] = candle_type
+    if candle_type in ['阳吞阴', '锤子线', '早晨之星', '刺透形态', '三连阳']:
+        longScore += 2
+        sub_scores['candle'] = {'long': 2, 'short': 0, 'desc': candle_type}
+    elif candle_type in ['阴吞阳', '上吊线', '黄昏之星', '乌云盖顶', '三连阴']:
+        shortScore += 2
+        sub_scores['candle'] = {'long': 0, 'short': 2, 'desc': candle_type}
+    else:
+        sub_scores['candle'] = {'long': 0, 'short': 0, 'desc': candle_type}
     # 动量背离
     momentum = detect_momentum_divergence(df)
     if momentum > 0:
         longScore += 2
-        details['momentum_divergence'] = True
+        sub_scores['momentum_divergence'] = {'long': 2, 'short': 0, 'desc': '看多背离'}
+        details['momentum_divergence'] = '看多背离'
     elif momentum < 0:
         shortScore += 2
-        details['momentum_divergence'] = True
+        sub_scores['momentum_divergence'] = {'long': 0, 'short': 2, 'desc': '看空背离'}
+        details['momentum_divergence'] = '看空背离'
     else:
-        details['momentum_divergence'] = False
+        sub_scores['momentum_divergence'] = {'long': 0, 'short': 0, 'desc': '无背离'}
+        details['momentum_divergence'] = '无背离'
+    # EMA21过滤（最后执行，保留明细）
+    last = df['last'].iloc[-1]
+    ema21 = df['EMA21'].iloc[-1]
+    if last < ema21:
+        details['ema21_filter'] = '15m收盘价未站上EMA21，long信号无效'
+        sub_scores['ema21_filter'] = {'long': 0, 'short': 0, 'desc': 'long信号被过滤'}
+        details['sub_scores'] = sub_scores
+        return 0, shortScore, details
+    if last > ema21:
+        details['ema21_filter'] = '15m收盘价未跌破EMA21，short信号无效'
+        sub_scores['ema21_filter'] = {'long': 0, 'short': 0, 'desc': 'short信号被过滤'}
+        details['sub_scores'] = sub_scores
+        return longScore, 0, details
+    details['sub_scores'] = sub_scores
     return longScore, shortScore, details
 
 # 动量背离检测模块
@@ -364,6 +414,9 @@ def analyze_vegas_tunnel(df):
     price = df['last'].iloc[-1]
     ema144 = df['EMA144'].iloc[-1]
     ema169 = df['EMA169'].iloc[-1]
+    # 打印调试信息
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"Vegas Tunnel判断参数: price={price}, ema144={ema144}, ema169={ema169}, ema144_slope={ema144_slope}, ema169_slope={ema169_slope}, ema_diff_now={ema_diff.iloc[-1]}, ema_diff_20ago={ema_diff.iloc[-20]}")
     # 趋势分数
     trend_score = 0
     if ema144_slope > 0 and ema169_slope > 0 and (price > ema144 and price > ema169) and (ema_diff.iloc[-1] > ema_diff.iloc[-20]):
@@ -379,6 +432,8 @@ def analyze_vegas_tunnel(df):
         trend = "cross"
         trend_score = 0
     ema_diff_slope = ema_diff.diff().mean()
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"Vegas Tunnel区间变化: ema_diff_slope={ema_diff_slope}")
     if ema_diff_slope > 0:
         range_change = "expanding"
     elif ema_diff_slope < 0:
@@ -388,7 +443,6 @@ def analyze_vegas_tunnel(df):
     return trend, range_change, trend_score
 
 # 更新数据验证和错误处理逻辑
-
 def validate_data(df, required_points):
     """
     验证数据点是否足够。
@@ -400,24 +454,6 @@ def validate_data(df, required_points):
         logger.error("Insufficient data points. Required: %d, Available: %d", required_points, len(df))
         return False
     return True
-
-# 5分钟周期信号确认。direction: 'long' or 'short'
-# 以5m最后一根K线的macd与signal判断方向。
-
-def confirm_5m_signal(df_5min, direction):
-    """
-    5分钟周期信号确认。direction: 'long' or 'short'
-    以5m最后一根K线的macd与signal判断方向。
-    """
-    if len(df_5min) < 2:
-        return False
-    if 'macd' not in df_5min.columns or 'signal' not in df_5min.columns:
-        return False
-    if direction == 'long' and df_5min['macd'].iloc[-1] > df_5min['signal'].iloc[-1]:
-        return True
-    if direction == 'short' and df_5min['macd'].iloc[-1] < df_5min['signal'].iloc[-1]:
-        return True
-    return False
 
 # 多周期MACD形态判断
 
@@ -443,6 +479,22 @@ def macd_cross_signal(df):
         return 'dead'        # 持续死叉
     else:
         return 'none'
+
+# 5分钟周期信号确认。direction: 'long' or 'short'
+def confirm_5m_signal(df_5min, direction):
+    """
+    5分钟周期信号确认。direction: 'long' or 'short'
+    以5m最后一根K线的macd与signal判断方向。
+    """
+    if len(df_5min) < 2:
+        return False
+    if 'macd' not in df_5min.columns or 'signal' not in df_5min.columns:
+        return False
+    if direction == 'long' and df_5min['macd'].iloc[-1] > df_5min['signal'].iloc[-1]:
+        return True
+    if direction == 'short' and df_5min['macd'].iloc[-1] < df_5min['signal'].iloc[-1]:
+        return True
+    return False
 
 # 主函数
 def main():
@@ -545,7 +597,7 @@ def main():
     logger.info("15m Long Score: %d | Short Score: %d", output['long_score'], output['short_score'])
     logger.info("MACD形态: 1H=%s, 15m=%s, 5m=%s", macd_1h, macd_15m, macd_5m)
     logger.info("多周期MACD共振: %s", output['multi_timeframe_macd'])
-    logger.info("信号细节: %s", output['signal_details'])
+    
     if output['recommendation'] == "多头强势，建议开多单":
         logger.info("【建议开多单】 开仓价: %.2f 止损: %.2f 止盈: %.2f", output['price'], output['stop_loss'], output['take_profit'])
     elif output['recommendation'] == "空头强势，建议开空单":
@@ -553,6 +605,39 @@ def main():
     else:
         logger.info("【建议】%s", output['recommendation'])
     logger.info("===== END =====\n")
+    # 整理信号细节输出
+    details = output['signal_details']
+    sub_scores = details.get('sub_scores', {})
+    logger.info("------ 信号细节明细 ------")
+    for k, v in sub_scores.items():
+        logger.info("%s: long得分=%s, short得分=%s, 说明=%s", k, v.get('long', 0), v.get('short', 0), v.get('desc', ''))
+    logger.info("-------------------------")
+    # Telegram推送（仅当多或空分值>=6时发送）
+    if output['long_score'] >= 6 or output['short_score'] >= 6:
+        tg_msg = f"[策略信号]\n时间: {output['time']}\n最新价: {output['price']}\n1H趋势: {trend_direction}\n区间: {range_change}\nLong: {output['long_score']} | Short: {output['short_score']}\nMACD: 1H={macd_1h}, 15m={macd_15m}, 5m={macd_5m}\n共振: {output['multi_timeframe_macd']}\n建议: {output['recommendation']}"
+        send_telegram_message(tg_msg)
+    else:
+        logger.debug("分值未达到推送阈值（long_score=%d, short_score=%d），不发送Telegram消息。", output['long_score'], output['short_score'])
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("未配置TELEGRAM_BOT_TOKEN或TELEGRAM_CHAT_ID，无法发送Telegram通知。")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    logger.debug(f"准备发送Telegram通知: url={url}, chat_id={TELEGRAM_CHAT_ID}, text={text}")
+    try:
+        resp = requests.post(url, data=payload, timeout=10)
+        logger.debug(f"Telegram响应: status_code={resp.status_code}, text={resp.text}")
+        if resp.status_code == 200:
+            logger.info("已发送Telegram通知。")
+        else:
+            logger.warning(f"Telegram通知失败: {resp.text}")
+    except Exception as e:
+        logger.warning(f"Telegram通知异常: {e}")
 
 if __name__ == "__main__":
     main()
