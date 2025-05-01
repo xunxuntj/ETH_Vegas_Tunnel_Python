@@ -6,10 +6,10 @@ import logging
 import requests
 
 # 日志等级设置
-LOGLEVEL = os.getenv("LOGLEVEL", "DEBUG").upper()  # 可通过环境变量控制
+LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()  # 默认INFO，开发时可设为DEBUG
 logging.basicConfig(
     format='%(asctime)s %(levelname)s: %(message)s',
-    level=getattr(logging, LOGLEVEL, logging.DEBUG)
+    level=getattr(logging, LOGLEVEL, logging.INFO)
 )
 logger = logging.getLogger(__name__)
 
@@ -614,7 +614,28 @@ def main():
     logger.info("-------------------------")
     # Telegram推送（仅当多或空分值>=6时发送）
     if output['long_score'] >= 6 or output['short_score'] >= 6:
-        tg_msg = f"[策略信号]\n时间: {output['time']}\n最新价: {output['price']}\n1H趋势: {trend_direction}\n区间: {range_change}\nLong: {output['long_score']} | Short: {output['short_score']}\nMACD: 1H={macd_1h}, 15m={macd_15m}, 5m={macd_5m}\n共振: {output['multi_timeframe_macd']}\n建议: {output['recommendation']}"
+        # 时间调整为GMT+8
+        from datetime import datetime, timedelta
+        gmt8_time = (datetime.strptime(output['time'], '%Y-%m-%d %H:%M') + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+        tg_msg = (
+            f"【ETH Vegas Tunnel 策略信号】\n"
+            f"时间：{gmt8_time} (GMT+8)\n"
+            f"最新价：{output['price']}\n"
+            f"1H趋势：{trend_direction} | 区间：{range_change}\n"
+            f"多头分：{output['long_score']} | 空头分：{output['short_score']}\n"
+            f"MACD形态：1H={macd_1h}，15m={macd_15m}，5m={macd_5m}\n"
+            f"多周期共振：{output['multi_timeframe_macd']}\n"
+            f"建议：{output['recommendation']}\n"
+            f"==================\n"
+            f"▶️ 开仓价：{output['price']}\n"
+            f"🎯 止盈1（TP1）：{output.get('take_profit', '')}\n"
+            f"🎯 止盈2（TP2）：{output.get('take_profit2', '')}\n"
+            f"⛔ 止损（SL）：{output.get('stop_loss', '')}\n"
+            f"==================\n"
+            f"操作建议：\n"
+            f" - 震荡市优先TP1，趋势市可分批持有至TP2\n"
+            f" - 请结合自身风控理性操作"
+        )
         send_telegram_message(tg_msg)
     else:
         logger.debug("分值未达到推送阈值（long_score=%d, short_score=%d），不发送Telegram消息。", output['long_score'], output['short_score'])
