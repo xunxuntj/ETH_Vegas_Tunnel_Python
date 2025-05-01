@@ -1,0 +1,31 @@
+name: Run ETH Vegas Tunnel Bot
+
+on:
+  schedule:
+    - cron: '*/3 * * * *'   # 每3分钟运行一次
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas requests gate-api
+
+      - name: Run ETH_Vegas_Tunnel.py
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+          LOGLEVEL: DEBUG
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python ETH_Vegas_Tunnel.py
