@@ -554,13 +554,6 @@ def main():
     long_5m = confirm_5m_signal(df_5min, 'long')
     short_5m = confirm_5m_signal(df_5min, 'short')
 
-    # 动态设置Telegram推送阈值
-    market_state = detect_market_state(df_15min)
-    if market_state == 'trend':
-        push_threshold = 6
-    else:
-        push_threshold = 8
-
     # 输出打分和开仓建议（格式化输出，便于市场操作参考）
     output = {
         "time": pd.to_datetime(df_15min['timestamp'].iloc[-1], unit='s').strftime('%Y-%m-%d %H:%M'),
@@ -626,8 +619,8 @@ def main():
     for k, v in sub_scores.items():
         logger.info("%s: long得分=%s, short得分=%s, 说明=%s", k, v.get('long', 0), v.get('short', 0), v.get('desc', ''))
     logger.info("-------------------------")
-    # Telegram推送（根据市场状态动态调整推送阈值）
-    if output['long_score'] >= push_threshold or output['short_score'] >= push_threshold:
+    # Telegram推送（仅当多或空分值>=6时发送）
+    if output['long_score'] >= 7 or output['short_score'] >= 7:
         # 时间调整为GMT+8
         from datetime import datetime, timedelta
         gmt8_time = (datetime.strptime(output['time'], '%Y-%m-%d %H:%M') + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -652,7 +645,7 @@ def main():
         )
         send_telegram_message(tg_msg)
     else:
-        logger.debug("分值未达到推送阈值（long_score=%d, short_score=%d, 阈值=%d），不发送Telegram消息。", output['long_score'], output['short_score'], push_threshold)
+        logger.debug("分值未达到推送阈值（long_score=%d, short_score=%d），不发送Telegram消息。", output['long_score'], output['short_score'])
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
