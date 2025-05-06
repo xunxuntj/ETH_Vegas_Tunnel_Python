@@ -613,7 +613,7 @@ def main():
         logger.info("%s: long得分=%s, short得分=%s, 说明=%s", k, v.get('long', 0), v.get('short', 0), v.get('desc', ''))
     logger.info("-------------------------")
     # Telegram推送（仅当多或空分值>=6时发送）
-    if output['long_score'] >= 6 or output['short_score'] >= 6:
+    if output['long_score'] >= 7 or output['short_score'] >= 7:
         # 时间调整为GMT+8
         from datetime import datetime, timedelta
         gmt8_time = (datetime.strptime(output['time'], '%Y-%m-%d %H:%M') + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
