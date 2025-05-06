@@ -560,6 +560,7 @@ def main():
         push_threshold = 6
     else:
         push_threshold = 8
+    logger.info("市场状态: %s, Telegram推送分数阈值: %d", market_state, push_threshold)
 
     # 输出打分和开仓建议（格式化输出，便于市场操作参考）
     output = {
